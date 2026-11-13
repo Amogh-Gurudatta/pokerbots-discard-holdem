@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test output (regenerable). The results ledger is kept; everything else under logs/ is not.
+bot/logs/*
+!bot/logs/results.csv
+# engine.py default log dir if run from the kit
+Starter Kit/logs/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
