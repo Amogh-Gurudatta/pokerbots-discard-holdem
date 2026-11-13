@@ -1,6 +1,6 @@
 # Pokerbots: Discard Hold'em
 
-A Python 3.11 bot for the Pokerbots competition. The game is heads-up no-limit Hold'em with **three hole cards and a simultaneous, exposed discard after the flop**. The submission deadline was 15 Nov 2026, 23:59 IST.
+A Python 3.11 bot for the Pokerbots competition. The game is heads-up no-limit Hold'em with **three hole cards and a simultaneous, exposed discard after the flop**.
 
 The submission is **[`bot/dist/bot.py`](bot/dist/bot.py)**: one self-contained file, standard library only, built from `bot/src/`.
 
