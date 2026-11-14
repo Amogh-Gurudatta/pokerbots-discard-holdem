@@ -17,3 +17,6 @@ Starter Kit/logs/
 *.swp
 
 memory.md
+
+# Generated opponent variants (tools/make_variants.py) and the staging copy of parameterized bots
+bot/opponents/generated/
