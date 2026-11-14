@@ -31,6 +31,13 @@ P = {
     "chk_real_oop": 0.92,
     "bet_sizes": [0.33, 0.66, 1.0, 1.5],
     "bet_edge": 0.0,
+    "f_alpha": 0.0,     # 0 = v4 path (size-independent fold rate); >0 = elastic path
+    "fsize_w": 6.0,     # prior weight for per-size-bucket fold rates
+    "fsize_learn": False,
+    "selector": False,  # learned opponent-type profile selection (needs SEL_W)
+    "sel_margin": 0.3,  # min predicted advantage (chips/hand) to leave base
+    "sel_hyst": 0.2,
+    "feat_log": False,  # dev: log opp features at checkpoints (with BOTDBG)  # per-bucket learning tested worse (confounded by spot selection)     # fold rate scales with (required equity of bet size)^alpha; 0 = size-independent
     "open_thr": 0.35,
     "time_frac": 0.12,
     "ev_raise": True,
@@ -52,6 +59,23 @@ except Exception:
     pass
 
 DBG = bool(os.environ.get("BOTDBG"))
+
+# Opponent-type profiles: P overlays the selector can switch between (base = v4 defaults).
+PROFILES = {
+    "base": {},
+    "elastic": {"f_alpha": 1.0},
+    "tightx": {"fr_mult": 0.5},
+}
+BASE_P = dict(P)
+
+# ==== SELECTOR WEIGHTS (inlined at build) ====
+try:
+    from selector_weights import SEL_W
+except Exception:
+    SEL_W = {}
+# ==== END SELECTOR WEIGHTS ====
+SEL_FIRST = 25
+SEL_EVERY = 25
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
 RV = {r: i for i, r in enumerate(RANKS)}  # 0..12
@@ -210,6 +234,48 @@ class OppModel:
         # per-street opportunity counts: "bet" = opp acts with no bet outstanding, "raise" = facing our bet
         self.st_opps = {}
         self.st_acts = {}
+        self.fold_by_size = {}  # size bucket -> [folds, faced] for opp facing our postflop bets
+        self.faced_log = []     # (our bet as pot fraction, opp folded?) for each of our postflop bets it faced
+        self.opp_bet_sizes = []  # opp postflop bet/raise sizes as pot fractions
+
+    def fold_at(self, ratio, f0):
+        """Opp fold probability vs our bet of `ratio`*pot: learned per size bucket, prior f0 * elasticity."""
+        req_b = ratio / (1.0 + 2.0 * ratio)
+        req_ref = 0.66 / (1.0 + 2 * 0.66)
+        prior = f0 * (req_b / req_ref) ** P["f_alpha"]
+        if not P["fsize_learn"]:
+            return prior
+        k, n = self.fold_by_size.get(size_bucket(ratio), (0, 0))
+        w = P["fsize_w"]
+        return (k + prior * w) / (n + w)
+
+    def features(self):
+        """Behaviour summary of the opponent (each value shrunk toward a neutral prior)."""
+        def shr(xs, prior, w=6.0):
+            return (sum(xs) + prior * w) / (len(xs) + w)
+        small = [f for r, f in self.faced_log if r < 0.85]
+        large = [f for r, f in self.faced_log if r >= 0.85]
+        f_small = shr(small, 0.4)
+        f_large = shr(large, 0.4)
+        # pot odds offered when the opp folded vs when it continued (pot-odds-driven bots fold more vs big bets)
+        rf = [r for r, f in self.faced_log if f]
+        rc = [r for r, f in self.faced_log if not f]
+        r_fold = shr(rf, 0.7)
+        r_cont = shr(rc, 0.7)
+        bs = self.opp_bet_sizes
+        bmean = shr(bs, 0.6)
+        bvar = shr([(x - bmean) ** 2 for x in bs], 0.05)
+        sdr = self.sd_pct["raise"]
+        sdc = self.sd_pct["call"]
+        return [
+            self.vpip_rate, self.pfr_rate, self.pf_fold_rate, self.aggr_rate, self.fold_to_bet_rate,
+            self.freq("flop", "bet", 0.4), self.freq("turn", "bet", 0.4), self.freq("river", "bet", 0.4),
+            self.freq("flop", "raise", 0.15), self.freq("turn", "raise", 0.15), self.freq("river", "raise", 0.15),
+            shr(sdr, 0.6), shr(sdc, 0.5),
+            f_small, f_large, f_large - f_small, r_fold - r_cont,
+            bmean, bvar ** 0.5,
+            self.jams / (self.hands + 5.0),
+        ]
 
     def freq(self, street, kind, prior, w=5.0):
         n = self.st_opps.get((street, kind), 0)
@@ -281,19 +347,44 @@ class OppModel:
     def pf_fold_rate(self):
         return self._r(self.pf_fold_to_raise, self.pf_faced_raise, 0.35)
 
-    def update_from_hand(self, history):
+    def update_from_hand(self, history, seat=None):
         self.hands += 1
         pf_v = False
         pf_r = False
         last_actor_bet = None  # who made the last bet/raise on the current street
         cur_street = None
+        # pot tracking (to measure our bet sizes as a fraction of the pot)
+        if seat == "button":
+            sb = {"me": 1, "opp": 2}
+        else:
+            sb = {"me": 2, "opp": 1}
+        pot = 3
+        my_ratio = None
         for h in history:
             st = h.get("street")
             if st != cur_street:
                 cur_street = st
                 last_actor_bet = "opp_blind" if st == "preflop" else None
+                if st != "preflop":
+                    sb = {"me": 0, "opp": 0}
             actor = h.get("actor")
             act = h.get("action")
+            if actor in ("me", "opp") and act in ("call", "raise"):
+                amt = int(h.get("amount", sb[actor]))
+                add = max(0, amt - sb[actor])
+                if actor == "me" and act == "raise" and st != "preflop":
+                    my_ratio = add / float(max(1, pot))
+                if actor == "opp" and act == "raise" and st != "preflop":
+                    self.opp_bet_sizes.append(add / float(max(1, pot)))
+                pot += add
+                sb[actor] = amt
+            if actor == "opp" and st != "preflop" and last_actor_bet == "me" and my_ratio is not None:
+                self.faced_log.append((my_ratio, act == "fold"))
+                bk = size_bucket(my_ratio)
+                fb = self.fold_by_size.setdefault(bk, [0, 0])
+                fb[1] += 1
+                if act == "fold":
+                    fb[0] += 1
             if actor == "opp":
                 if st == "preflop":
                     if act in ("call", "raise"):
@@ -439,12 +530,70 @@ def mc_equity(rng, hero_sets, board_i, sampler, deadline, max_trials=4000, min_t
     return [w / trials for w in wins]
 
 
+def size_bucket(ratio):
+    if ratio < 0.45:
+        return 0
+    if ratio < 0.85:
+        return 1
+    if ratio < 1.25:
+        return 2
+    return 3
+
+
+def mc_by_cand(rng, hero_sets, board_i, cands, avail, deadline, max_trials=1500, min_trials=40):
+    """MC that records wins per opponent candidate: returns (wins[set][i], counts[i])."""
+    need = 5 - len(board_i)
+    nset = len(hero_sets)
+    nc = len(cands)
+    wins = [[0.0] * nc for _ in range(nset)]
+    cnt = [0] * nc
+    hero_lists = [list(h) for h in hero_sets]
+    t_check = time.perf_counter
+    trials = 0
+    while trials < max_trials:
+        if trials >= min_trials and (trials & 31) == 0 and t_check() > deadline:
+            break
+        i = rng.randrange(nc)
+        opp = cands[i]
+        if need:
+            runout = []
+            while len(runout) < need:
+                x = avail[rng.randrange(len(avail))]
+                if x in opp or x in runout:
+                    continue
+                runout.append(x)
+            b5 = board_i + runout
+        else:
+            b5 = board_i
+        ov = best_of(opp, b5)
+        for j in range(nset):
+            hv = best_of(hero_lists[j], b5)
+            if hv > ov:
+                wins[j][i] += 1.0
+            elif hv == ov:
+                wins[j][i] += 0.5
+        cnt[i] += 1
+        trials += 1
+    return wins, cnt
+
+
+def top_equity(wins, cnt, k):
+    """Best-over-sets equity vs the top k candidates (candidates sorted weakest first)."""
+    nc = len(cnt)
+    lo = max(0, nc - k)
+    n = sum(cnt[lo:])
+    if n == 0:
+        return 0.5
+    return max(sum(w[lo:]) / n for w in wins)
+
+
 # ------------------------------------------------------------------ the bot
 
 class Bot:
     def __init__(self):
         self.rng = random.Random()
         self.opp = OppModel()
+        self.profile = "base"
         self.total_hands = 200
         self.time_bank_ms = 30000
         self.hand_id = 0
@@ -495,10 +644,52 @@ class Bot:
         if hc:
             self.hole = list(hc)
 
+    def maybe_select(self):
+        """Every SEL_EVERY hands, predict each profile's advantage from opp features; apply the best."""
+        if not P["selector"] or not SEL_W or self.hand_id < SEL_FIRST or self.hand_id % SEL_EVERY:
+            return
+        x = self.opp.features()
+        cp = min(SEL_W["checkpoints"], key=lambda c: abs(c - self.hand_id))
+        model = SEL_W["models"][str(cp)]
+        z = [(xi - mu) / sd for xi, mu, sd in zip(x, model["mean"], model["scale"])]
+        best, best_adv = "base", 0.0
+        for name, coef in model["coef"].items():
+            adv = coef[0] + sum(c * zi for c, zi in zip(coef[1:], z))
+            if adv > best_adv:
+                best, best_adv = name, adv
+        cur = self.profile
+        cur_adv = 0.0
+        if cur != "base" and cur in model["coef"]:
+            coef = model["coef"][cur]
+            cur_adv = coef[0] + sum(c * zi for c, zi in zip(coef[1:], z))
+        margin = max(P["sel_margin"], model.get("margin", 0.0))
+        if best != cur and best_adv > margin and best_adv > cur_adv + P["sel_hyst"]:
+            self.apply_profile(best)
+        elif cur != "base" and cur_adv < margin * 0.5:
+            self.apply_profile("base")
+        if DBG:
+            log("SEL h%d profile=%s adv=%.2f" % (self.hand_id, self.profile, best_adv))
+
+    def apply_profile(self, name):
+        P.clear()
+        P.update(BASE_P)
+        P.update(PROFILES.get(name, {}))
+        self.profile = name
+
     def on_hand_result(self, m):
         try:
             self.cum_net += int(m.get("net", 0))
-            self.opp.update_from_hand(m.get("history") or [])
+            self.opp.update_from_hand(m.get("history") or [], self.seat)
+            if DBG and self.hand_id in (25, 50, 75, 100, 150, 200, 250, 300, 400, 500):
+                log("FEAT h%d %s" % (self.hand_id, json.dumps([round(v, 4) for v in self.opp.features()])))
+            try:
+                self.maybe_select()
+            except Exception as ex:
+                log("select error", repr(ex))
+                self.apply_profile("base")
+            if DBG and self.hand_id % 50 == 0:
+                log("H%d fold_by_size=%s ftb=%.2f faced=%d" % (self.hand_id, self.opp.fold_by_size,
+                    self.opp.fold_to_bet_rate, self.opp.faced_bet))
             if m.get("opp_hole_cards"):
                 self.opp.showdowns += 1
                 self.opp.learn_showdown(self.rng, m.get("history") or [], m.get("board") or [],
@@ -719,6 +910,8 @@ class Bot:
 
     def bet_or_check(self, req, deadline, e, street, station, maniac):
         """EV comparison of betting sizes vs checking, using opp fold rate and calling range."""
+        if P["f_alpha"] != 0.0:
+            return self.bet_or_check_elastic(req, deadline, e, street, station, maniac)
         pot = float(req["pot"])
         sets, board_i, sampler = self._spot
         f = max(0.03, min(0.85, self.opp.fold_to_bet_rate))
@@ -740,6 +933,41 @@ class Bot:
             b = min(pot * frac, stack)
             if b < 2:
                 continue
+            ev = f * pot + (1.0 - f) * (e_c * (pot + 2.0 * b) - b)
+            if ev > best_ev + P["bet_edge"] * pot:
+                best_ev, best_amt = ev, b
+        if best_amt is None:
+            return self.act("check")
+        return self.raise_to(req, req["my_bet"] + best_amt)
+
+
+    def bet_or_check_elastic(self, req, deadline, e, street, station, maniac):
+        """EV comparison of betting sizes vs checking, using opp fold rate and calling range."""
+        pot = float(req["pot"])
+        sets, board_i, sampler = self._spot
+        f0 = max(0.03, min(0.85, self.opp.fold_to_bet_rate))
+        if station:
+            f0 = min(f0, 0.15)
+        # one MC pass with per-candidate stats; the calling range for each size is the top (1-f(b))
+        cands = sorted(sampler.cands, key=lambda p: keep_score(p, board_i))
+        wins, cnt = mc_by_cand(self.rng, sets, board_i, cands, sampler.avail, deadline,
+                               max_trials=int(1500 * P["cmul"]), min_trials=40)
+        nc = len(cands)
+        # checking: we realize roughly our equity of the current pot (less OOP, opp may bet/bluff)
+        ev_check = e * pot * (P["chk_real_ip"] if self.seat == "button" else P["chk_real_oop"])
+        if maniac and self.seat == "big_blind":
+            ev_check = e * pot * 1.05  # maniac bets into us: checking keeps its bluffs in
+        best_ev, best_amt = ev_check, None
+        stack = req["max_raise"] - req["my_bet"]
+        req_ref = 0.66 / (1.0 + 2 * 0.66)
+        for frac in P["bet_sizes"]:
+            b = min(pot * frac, stack)
+            if b < 2:
+                continue
+            req_b = b / (pot + 2.0 * b)  # equity a pot-odds caller needs
+            f = max(0.02, min(0.9, self.opp.fold_at(b / pot, f0)))
+            k = max(6, int(nc * (1.0 - f) + 0.5))
+            e_c = top_equity(wins, cnt, k)
             ev = f * pot + (1.0 - f) * (e_c * (pot + 2.0 * b) - b)
             if ev > best_ev + P["bet_edge"] * pot:
                 best_ev, best_amt = ev, b
