@@ -1,6 +1,6 @@
 # Discard Hold'em bot
 
-Our competition bot. The organisers' material is in `../Starter Kit/`, kept untouched. Rules, limits and the strategy history are in `../memory.md`.
+Our competition bot. The organisers' material is in `../Starter Kit/`, kept untouched. Rules, strategy and results are in `../docs/`.
 
 **Submission file: `dist/bot.py`** (currently v4, identical to `opponents/v4_bot.py`). It is a single self-contained file built from `src/`. Upload that file. Never edit it by hand.
 
