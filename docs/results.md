@@ -28,6 +28,8 @@ Submission: **v4** (`bot/dist/bot.py`, identical to `bot/opponents/v4_bot.py`).
 | **Fold rate that scales with bet size** (α = 1) | +1.01 better than v4 head-to-head, but **−4.1 vs `tight_bot` and −2.6 vs `riverbluff_bot`**, which fold or call regardless of size |
 | Learning the fold rate per bet-size bucket | Confounded: we overbet in spots where the opponent is already weak, so the learned rates were inflated and the bot over-bluffed. Both versions were worse in real-format validation (v4 −0.31, v3 −0.55 head-to-head). Code kept in `bot/experiments/strategy_v5_elastic.py` |
 
+| **Learned opponent-type selector** (ridge regression on 20 opponent-behaviour features, switching between v4, size-elastic and lower fold-to-raise profiles every 25 hands) | **No usable signal.** Trained on 128 generated opponents × 3 profiles × 2400 hands. Cross-validated gain was −0.03 to +0.02/hand, and the held-out gain was 0.00. The apparent "oracle" gain (+0.6 to +0.95) was mostly selection bias from picking the best of three noisy measurements. Code kept in `bot/src/strategy.py`, off by default (`"selector": False`); tools: `make_variants.py`, `collect.py`, `train_selector.py` |
+
 ## Lessons
 
 1. **Structural changes mattered; parameter changes mostly did not.** The jumps came from EV-based betting and from the unbiased frequency priors. After v4, nearly every tweak was inside the noise or worse.

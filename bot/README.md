@@ -20,6 +20,9 @@ Our competition bot. The organisers' material is in `../Starter Kit/`, kept unto
 | `tools/paths.py` | Shared paths and bot-name resolution. |
 | `experiments/` | Parked strategy variants that tested worse (e.g. `strategy_v5_elastic.py`, size-elastic fold model). Not used by the build. |
 | `tools/sweep.py` | A/B several `BOTP` parameter variants on identical seeds vs a panel (`--variants '{"name":{...}}'`). |
+| `tools/make_variants.py` | Writes randomized copies of the parameterized sparring bots (`opponents/_param/`) and EV-bot variants to `opponents/generated/` (git-ignored) with a `manifest.json`. |
+| `tools/collect.py` | Plays each selector profile vs each generated variant and records opponent features plus chips/hand to `logs/collect/<ts>/data.jsonl`. |
+| `tools/train_selector.py` | Fits the ridge-regression profile selector (pure Python) and reports CV, leave-one-family-out and holdout gains. It writes `src/selector_weights.py`, which the build inlines. The experiment found no signal, so the selector is off (`"selector": False`) and no weights file is committed. |
 | `opponents/` | Sparring bots (see below) and frozen snapshots of our own versions (`v1_bot.py`, `v2_bot.py`, …). |
 | `logs/` | All test output (see below). Safe to delete. |
 

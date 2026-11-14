@@ -43,6 +43,7 @@ Documented because it shaped the final design:
 
 - **More compute.** Tripling the Monte Carlo trials gave no gain (+4.47 vs +4.54). The limit is the quality of the opponent model, not sampling noise, so we didn't switch to numpy.
 - **Bet-size-dependent fold rates.** Letting the fold rate scale with bet size beat our earlier builds head-to-head but lost heavily to bots that ignore sizing. Parked in `bot/experiments/`.
+- **A learned opponent-type selector.** A small regression model read about 20 of the opponent's behaviour statistics and switched between setting profiles. Trained on 128 generated opponents, it found no usable signal (held-out gain 0.00 chips/hand). The differences between profiles were mostly measurement noise. The code is in `bot/src/` but switched off.
 - **Small parameter tweaks after v4.** Every one landed inside the measurement noise or worse, so v4 was frozen.
 
 Full history: [docs/results.md](docs/results.md).
